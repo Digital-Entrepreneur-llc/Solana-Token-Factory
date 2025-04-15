@@ -6,4 +6,4 @@ Solana Token Factory interacts with your wallet (e.g. Phantom) for the sole purp
 
 No cookies, tracking, or analytics are used unless explicitly enabled in the future.
 
-If you have concerns, email: support@yoursite.com
+If you have concerns, email: support@solanatokenfactory.com
