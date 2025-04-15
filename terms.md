@@ -9,4 +9,4 @@ By using Solana Token Factory, you agree to the following:
 
 We reserve the right to refuse service at any time for any reason.
 
-For support, contact: support@yoursite.com
+For support, contact: support@solanatokenfactory.com
