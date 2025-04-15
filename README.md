@@ -1,28 +1,36 @@
-# Solana Token Factory
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-Solana Token Factory is a **paid SaaS tool** that lets anyone launch SPL Tokens on the Solana blockchain — no code required.
+## Getting Started
 
-Built with Next.js, Phantom Wallet Adapter, Metaplex Token Metadata, and Umi.
+First, run the development server:
 
-> **Note:** This is a commercial service. A one-time fee is required to deploy tokens.
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
 
-## Features
-- One-click SPL token deployment
-- Phantom wallet integration
-- Token metadata support (Metaplex)
-- IPFS metadata hosting
-- Simple and secure UI
-- Powered by Umi + Next.js + TypeScript
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-## Website
-[https://your-site-url.com](https://your-site-url.com)
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
-## Socials
-- Twitter/X: [@yourhandle](https://twitter.com/yourhandle)
-- Medium: [medium.com/@yourhandle](https://medium.com/@yourhandle)
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-## Disclaimer
-This repository includes the public-facing structure of the project for transparency. Core backend logic and billing infrastructure are proprietary.
+## Learn More
 
-## License
-[MIT](./LICENSE)
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
