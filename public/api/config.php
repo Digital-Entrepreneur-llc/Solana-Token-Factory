@@ -21,10 +21,10 @@ if (file_exists($private_config_path)) {
 } else {
     // Fallback if private config not available (development only!)
     // IMPORTANT: Replace these with your actual database credentials
-    define('DB_HOST', 'localhost');
-    define('DB_USER', 'solanatokenfactory'); // Replace with your database username
-    define('DB_PASS', 'ArmyArmy33!!'); // Replace with your database password 
-    define('DB_NAME', 'solanatokenfactory');
+    define('DB_HOST', '');
+    define('DB_USER', ''); // Replace with your database username
+    define('DB_PASS', ''); // Replace with your database password 
+    define('DB_NAME', '');
 }
 
 // API Configuration
