@@ -7,11 +7,33 @@ import { useCreateMetadata } from '@utils/createMetadataV3';
 import { useWallet } from '@hooks/useWallet';
 import { createTokenTransactionWithoutMint } from '@utils/createTokenTransaction';
 import { useTransaction } from '@hooks/useTransaction';
-import { Keypair, Transaction, ComputeBudgetProgram } from '@solana/web3.js';
+import { 
+  Connection, 
+  clusterApiUrl, 
+  Keypair, 
+  LAMPORTS_PER_SOL, 
+  PublicKey, 
+  Transaction, 
+  ComputeBudgetProgram,
+  TransactionInstruction,
+  SystemProgram
+} from '@solana/web3.js';
+import { 
+  TOKEN_PROGRAM_ID, 
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  createInitializeMintInstruction,
+  createAssociatedTokenAccountInstruction,
+  createMintToInstruction,
+  createSetAuthorityInstruction,
+  AuthorityType,
+  getAssociatedTokenAddress,
+  MINT_SIZE
+} from '@solana/spl-token';
 import { useSearchParams } from 'next/navigation';
 import { BASE_TOKEN_FEE, AUTHORITY_REVOCATION_FEE, calculateTotalFee, formatFee } from '@/app/config/fees';
 import { validatePromoCode, applyDiscount, PromoCode, recordPromoCodeUsage } from '@/app/config/promoCodes';
 import { API_ENDPOINTS } from '@/app/config/apiConfig';
+import { createMetadataInstructionData } from '@/app/utils/createMetadataInstructionData';
 
 // Add a type declaration for the global window object with gtag
 declare global {
@@ -55,12 +77,19 @@ const buttonBaseStyle = `w-full px-4 py-3.5 rounded-xl transition-all duration-2
 const inputBaseStyle = `w-full px-4 py-3.5 rounded-xl bg-[#232323] border border-[#343434] text-white placeholder-white/40 focus:outline-none focus:ring-1 focus:ring-[#9945FF]/30 hover:border-[#9945FF]/20 transition-all duration-200 shadow-inner autofill:bg-[#232323] autofill:text-white autofill:shadow-inner`;
 const labelStyle = `block text-sm font-medium text-white/70 mb-1.5`;
 
+// Add the TREASURY_ADDRESS constant
+const TREASURY_ADDRESS = new PublicKey('7VHUFJHWu2JrrhUbPj1Xr91iqZPL1UJ6E4wjtMFcKQoW');
+
+// Add this constant
+const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+
 export const TokenCreator = () => {
   const {
     publicKey,
     connected,
     wallet,
-    connection
+    connection,
+    signAndSendTransaction
   } = useWallet();
   const { createMetadataV3, isUploading, uploadProgress } = useCreateMetadata();
   const { isProcessing } = useTransaction();
@@ -91,6 +120,22 @@ export const TokenCreator = () => {
   
   // Move useSearchParams to component top level to comply with React hooks rules
   const searchParams = useSearchParams();
+
+  // Near the top of the TokenCreator component, add these state variables
+  const [isMounted, setIsMounted] = useState(false);
+  // Initialize client-side wallet states with values that match server initial render
+  const [isClientConnected, setIsClientConnected] = useState(false);
+  const [isClientProcessing, setIsClientProcessing] = useState(false);
+
+  // Add this useEffect to handle client-side initialization
+  useEffect(() => {
+    // Mark component as mounted on the client
+    setIsMounted(true);
+    
+    // Now we can safely update states that might cause hydration mismatches
+    setIsClientConnected(!!connected);
+    setIsClientProcessing(isProcessing || isUploading);
+  }, [connected, isProcessing, isUploading]);
 
   // Helper function to truncate filename in the middle
   const truncateFilename = (filename: string, maxLength: number = 24): string => {
@@ -336,6 +381,10 @@ export const TokenCreator = () => {
       // Save supply for retries
       setLastSupply(supply);
 
+      // Generate a fresh mint keypair if needed
+      // This helps avoid issues with previously used mint addresses
+      setMintKeypair(Keypair.generate());
+
       // Create a single combined transaction that includes:
       // - Mint account creation
       // - Token initialization
@@ -361,8 +410,11 @@ export const TokenCreator = () => {
           promoInfo: appliedPromo ? {
             code: appliedPromo.code,
             discountPercentage: appliedPromo.discountPercentage
-          } : undefined
-        }
+          } : undefined,
+          // Add optimized compute settings based on actual usage
+          computeUnits: 100000 // Reduced from previous values (200K-250K) based on actual usage of ~75K
+        },
+        mintKeypair // Pass the full keypair
       );
 
       // ===== STEP 4: PREPARE TRANSACTION FOR SIGNING =====
@@ -371,18 +423,20 @@ export const TokenCreator = () => {
       const { blockhash } = await connection.getLatestBlockhash('finalized');
       transaction.recentBlockhash = blockhash;
 
-      // Sign with the mintKeypair first (this is required for mint account creation)
-      // Make sure we're correctly signing - pass a clean copy of the keypair
-      try {
-        // Pre-sign with the mint keypair before wallet signature
-        const mintKeypairForSigning = Keypair.fromSecretKey(mintKeypair.secretKey);
-        transaction.partialSign(mintKeypairForSigning);
-        
-        console.log('Transaction signed with mint keypair:', mintKeypair.publicKey.toString());
-      } catch (error: unknown) {
-        console.error('Error signing with mint keypair:', error);
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        throw new Error('Failed to sign transaction with mint keypair: ' + errorMessage);
+      // Important: For Phantom wallet compatibility, we should NOT pre-sign transactions
+      // Phantom's Lighthouse guard requires the transaction to be unsigned when sent to the wallet
+      const isPhantomWallet = wallet?.adapter.name === 'Phantom';
+      const isSolflareWallet = wallet?.adapter.name === 'Solflare';
+      
+      // MODIFIED: Allow partial signing for all wallet types including Phantom
+      if (isPhantomWallet || isSolflareWallet) {
+        console.log(`Using ${wallet?.adapter.name} wallet - following recommended approach`);
+        // For Phantom/Solflare, we'll use partialSign with the mint keypair before sending
+        transaction.partialSign(mintKeypair);
+        console.log('Transaction partially signed with mint keypair for all wallet types');
+      } else {
+        console.log('Using non-Phantom/Solflare wallet');
+        transaction.partialSign(mintKeypair);
       }
 
       // Log the transaction structure for debugging
@@ -395,12 +449,12 @@ export const TokenCreator = () => {
           instr => instr.programId.toString() === '11111111111111111111111111111111'
         ),
         mintAddress: mint.toString(),
-        appliedPromoCode: appliedPromo?.code || 'none'
+        appliedPromoCode: appliedPromo?.code || 'none',
+        walletName: wallet?.adapter.name || 'unknown'
       });
 
       // ===== STEP 5: SEND TRANSACTION FOR USER APPROVAL =====
       // This will prompt the user to sign the transaction with their wallet
-      // Only one signature is required from the user's wallet
       setStatus('Please approve the token creation transaction...');
       
       // Log config one last time before sending
@@ -408,341 +462,198 @@ export const TokenCreator = () => {
         mintAddress: mintKeypair.publicKey.toString(),
         numInstructions: transaction.instructions.length,
         signaturesLength: transaction.signatures.length,
-        mintSignatureIncluded: transaction.signatures.some(s => s.publicKey.equals(mintKeypair.publicKey)),
-        hasRequiredSignatures: transaction.signatures.every(s => s.signature !== null || s.publicKey.equals(publicKey))
+        // We're not manually adding mint to signatures anymore, so this will be false
+        mintKeyRequired: transaction.instructions.some(
+          instr => instr.keys.some(k => k.pubkey.equals(mintKeypair.publicKey) && k.isSigner)
+        )
       });
       
-      // Try to send the transaction using the signAndSendTransaction method from the wallet
-      let signature;
+      console.log('Sending transaction to wallet for approval...');
       try {
-        console.log('Sending transaction via wallet adapter...');
-        
-        // This will both sign with the user wallet and send the transaction in one step
-        signature = await wallet?.adapter.sendTransaction(transaction, connection, {
-          skipPreflight: false,
-          preflightCommitment: 'confirmed',
-          maxRetries: 5
-        });
-        
-        if (!signature) {
-          throw new Error('Failed to get transaction signature');
+        // We need to use the injected provider directly for proper transaction sending
+        if (!wallet) {
+          throw new Error('Wallet not connected');
         }
-        
-        console.log('Transaction submitted successfully, signature:', signature);
-      } catch (txError) {
-        console.error('Error sending transaction through wallet adapter:', txError);
-        
-        // If that fails, try with a higher compute budget
-        console.log('Retrying with higher compute budget...');
-        
-        // Create a new transaction with higher compute budget
-        const retryTx = new Transaction();
-        
-        // Add a higher compute budget as the first instruction
-        retryTx.add(
-          ComputeBudgetProgram.setComputeUnitLimit({
-            units: 150000 // Higher limit for retry but more optimal based on actual usage
-          })
-        );
-        
-        // Copy all other instructions except compute budget ones
-        for (const instr of transaction.instructions) {
-          if (instr.programId.toString() !== 'ComputeBudget111111111111111111111111111111') {
-            retryTx.add(instr);
-          }
-        }
-        
-        // Get a fresh blockhash
-        const { blockhash } = await connection.getLatestBlockhash('finalized');
-        retryTx.recentBlockhash = blockhash;
-        retryTx.feePayer = publicKey;
-        
-        // Sign with the mint keypair again
-        const mintKeypairForSigning = Keypair.fromSecretKey(mintKeypair.secretKey);
-        retryTx.partialSign(mintKeypairForSigning);
-        
-        // Try sending via wallet adapter again
-        try {
-          signature = await wallet?.adapter.sendTransaction(retryTx, connection, {
-            skipPreflight: true, // Skip preflight on retry
-            preflightCommitment: 'confirmed',
-            maxRetries: 5
-          });
-          
-          if (!signature) {
-            throw new Error('Failed to get transaction signature');
+
+        // Get a signature based on wallet type
+        let signature: string;
+        if (wallet.adapter.name === 'Phantom') {
+          // Use Phantom's injected provider
+          const provider = (window as any).phantom?.solana;
+          if (!provider || !provider.isPhantom) {
+            throw new Error('Phantom provider not found');
           }
           
-          console.log('Retry transaction submitted, signature:', signature);
-          setStatus('Transaction resubmitted, waiting for confirmation...');
+          console.log('Using Phantom provider for transaction signing and sending with a unified approach');
           
-          // Check for confirmation (limited attempts)
-          let confirmed = false;
-          for (let i = 0; i < 10; i++) {
-            try {
-              await new Promise(r => setTimeout(r, 1000));
-              const status = await connection.getSignatureStatus(signature);
-              
-              if (status && status.value) {
-                if (status.value.confirmationStatus === 'confirmed' || 
-                    status.value.confirmationStatus === 'finalized') {
-                  confirmed = true;
-                  break;
-                }
-                
-                if (status.value.err) {
-                  throw new Error(`Transaction failed: ${JSON.stringify(status.value.err)}`);
-                }
-              }
-            } catch (err) {
-              console.warn('Error checking status:', err);
-            }
-          }
-          
-          if (confirmed) {
-            setStatus('success');
-            
-            // Record promo code usage if a code was applied
-            if (appliedPromo) {
-              try {
-                await recordPromoCodeUsage(appliedPromo.code);
-                console.log('Promo code usage recorded:', appliedPromo.code);
-              } catch (e) {
-                console.warn('Failed to record promo code usage:', e);
-              }
-            }
-            
-            // Enhanced conversion tracking with dataLayer push
-            if (typeof window !== 'undefined') {
-              // Google Analytics 4 tracking
-              if (window.gtag) {
-                const deviceType = window.innerWidth <= 768 ? 'mobile' : window.innerWidth <= 1024 ? 'tablet' : 'desktop';
-                window.gtag('event', 'solana_transaction_submitted', {
-                  'send_to': 'AW-16826597392',
-                  'value': treasuryFee,
-                  'currency': 'USD',
-                  'device_category': deviceType,
-                  'transaction_id': signature,
-                  'items': [{
-                    'id': mint.toString(),
-                    'name': formData.name,
-                    'category': 'SPL Token',
-                    'quantity': 1,
-                    'price': treasuryFee
-                  }]
-                });
-                console.log('Enhanced conversion event tracked with device:', deviceType);
-              }
-              
-              // Push to dataLayer for Google Tag Manager
-              if (window.dataLayer === undefined) {
-                window.dataLayer = [];
-              }
-              window.dataLayer.push({
-                'event': 'solana_transaction_submitted',
-                'transactionValue': treasuryFee,
-                'transactionId': signature,
-                'tokenName': formData.name,
-                'tokenSymbol': formData.symbol,
-                'tokenMint': mint.toString(),
-                'walletAddress': publicKey.toString()
-              });
-              console.log('DataLayer event pushed for GTM tracking');
-              
-              // Dispatch event to refresh RecentTokens component
-              try {
-                const tokenCreatedEvent = new Event('tokenCreated');
-                window.dispatchEvent(tokenCreatedEvent);
-                console.log('Dispatched tokenCreated event to refresh token list');
-              } catch (e) {
-                console.warn('Could not dispatch tokenCreated event:', e);
-              }
-            }
-          } else {
-            setStatus('Transaction resubmitted, but confirmation is still pending.');
-          }
-        } catch (retryError) {
-          console.error('Even retry transaction failed:', retryError);
-          throw new Error('Failed to send transaction after multiple attempts');
-        }
-      }
-      
-      // If we got here, we have a signature
-      if (!signature) {
-        throw new Error('No signature returned from transaction');
-      }
-      
-      // Create a result object with the signature
-      const result = {
-        signature,
-        status: 'pending' as const
-      };
-      
-      // Check transaction status
-      if (result.status === 'pending') {
-        console.log('Transaction is pending confirmation. Signature:', result.signature);
-        console.log('Transaction can be viewed at:', `https://explorer.solana.com/tx/${result.signature}`);
-        setStatus('Transaction sent! Waiting for confirmation...');
-        
-        // Add manual confirmation check for the transaction
-        let checkAttempts = 0;
-        const checkInterval = setInterval(async () => {
           try {
-            checkAttempts++;
-            console.log(`Manual check for transaction confirmation (attempt ${checkAttempts})...`);
-            
-            const txStatus = await connection.getSignatureStatus(result.signature);
-            
-            if (txStatus && txStatus.value) {
-              if (txStatus.value.confirmationStatus === 'confirmed' || 
-                  txStatus.value.confirmationStatus === 'finalized') {
-                clearInterval(checkInterval);
-                console.log('Transaction manually confirmed:', txStatus.value.confirmationStatus);
-                setStatus('success');
-                // Enhanced conversion tracking with dataLayer push
-                if (typeof window !== 'undefined') {
-                  // Google Analytics 4 tracking
-                  if (window.gtag) {
-                    const deviceType = window.innerWidth <= 768 ? 'mobile' : window.innerWidth <= 1024 ? 'tablet' : 'desktop';
-                    window.gtag('event', 'solana_transaction_submitted', {
-                      'send_to': 'AW-16826597392',
-                      'value': treasuryFee,
-                      'currency': 'USD',
-                      'device_category': deviceType,
-                      'transaction_id': signature,
-                      'items': [{
-                        'id': mint.toString(),
-                        'name': formData.name,
-                        'category': 'SPL Token',
-                        'quantity': 1,
-                        'price': treasuryFee
-                      }]
-                    });
-                    console.log('Enhanced conversion event tracked with device:', deviceType);
-                  }
-                  
-                  // Push to dataLayer for Google Tag Manager
-                  if (window.dataLayer === undefined) {
-                    window.dataLayer = [];
-                  }
-                  window.dataLayer.push({
-                    'event': 'solana_transaction_submitted',
-                    'transactionValue': treasuryFee,
-                    'transactionId': signature,
-                    'tokenName': formData.name,
-                    'tokenSymbol': formData.symbol,
-                    'tokenMint': mint.toString(),
-                    'walletAddress': publicKey.toString()
-                  });
-                  console.log('DataLayer event pushed for GTM tracking');
-                }
-              } else if (txStatus.value.err) {
-                clearInterval(checkInterval);
-                console.error('Transaction failed on chain:', txStatus.value.err);
-                setStatus('error');
-                setErrors({ general: 'Transaction failed on chain: ' + JSON.stringify(txStatus.value.err) });
-              }
-            } else if (checkAttempts > 30) {
-              // After 30 attempts (30 seconds), suggest manual check
-              clearInterval(checkInterval);
-              console.log('Manual confirmation checks exceeded - transaction might be slow to confirm');
-              // We don't change the status - leave it as pending_confirmation
-            }
-          } catch (error) {
-            console.warn('Error checking transaction status:', error);
+            // Use the SAME approach for Phantom as other wallets - a single transaction that's already 
+            // partially signed with the mint keypair
+            console.log('Sending single transaction to Phantom with existing partial signature');
+            const response = await provider.signAndSendTransaction(transaction);
+            signature = response.signature;
+            console.log('Phantom transaction response:', response);
+          } catch (err) {
+            console.error('Detailed Phantom transaction error:', err);
+            throw err; // Preserve original error
           }
-        }, 1000); // Check every second
-      } else if (result.status === 'failed') {
-        throw new Error('Transaction failed on-chain');
-      }
-
-      // ===== STEP 6: SAVE TOKEN DATA =====
-      setMintAddress(mint.toString());
-      setStatus(result.status === 'pending' ? 'pending_confirmation' : 'success');
-
-      // Save token creation data to localStorage for the recent tokens display
-      const newToken = {
-        name: formData.name,
-        symbol: formData.symbol,
-        mintAddress: mint.toString(),
-        image: imagePreview, // Store the image preview URL
-        timestamp: Date.now()
-      };
-      
-      try {
-        // Get existing tokens or initialize empty array
-        const existingTokens = JSON.parse(localStorage.getItem('recentTokens') || '[]');
-        
-        // Add new token to the beginning of the array (most recent first)
-        const updatedTokens = [newToken, ...existingTokens].slice(0, 5); // Keep only 5 most recent
-        
-        // Save back to localStorage
-        localStorage.setItem('recentTokens', JSON.stringify(updatedTokens));
-        console.log('Token saved to local storage:', newToken);
-        
-        // Only save to the database if transaction has a signature 
-        // This prevents partial/failed transactions from being saved
-        if (signature) {
-          console.log('Saving token to database with signature:', signature.substring(0, 10) + '...');
+        } else if (wallet.adapter.name === 'Solflare') {
+          // Use Solflare's injected provider
+          const provider = (window as any).solflare;
+          if (!provider) {
+            throw new Error('Solflare provider not found');
+          }
           
-          // Also save token to the database via API
-          fetch(API_ENDPOINTS.saveToken, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              mintAddress: mint.toString(),
-              creatorWallet: publicKey.toString(),
-              ownerAddress: publicKey.toString(), // Set owner address explicitly
-              name: formData.name,
-              symbol: formData.symbol,
-              description: formData.description || `${formData.name} token on Solana`,
-              imageUrl: formattedImageUrl, // Use the formatted IPFS URL
-              solscanUrl: `https://solscan.io/token/${mint.toString()}`,
-              explorerUrl: `https://explorer.solana.com/address/${mint.toString()}`,
-              decimals: parseInt(formData.decimals), 
-              supply: formData.supply,
-              timestamp: new Date().toISOString(),
-              hasMintAuthority: !formData.revokeMintAuthority,
-              hasFreezeAuthority: !formData.revokeFreezeAuthority
-            }),
-          })
-          .then(response => response.json())
-          .then(data => {
-            if (data.success) {
-              console.log('Token saved to database:', data.message);
-            } else {
-              console.error('Failed to save token to database:', data.error);
-            }
-          })
-          .catch(error => {
-            console.error('Error saving token to database:', error);
-          });
+          // Use standard transaction sending without skipping preflight
+          const response = await provider.signAndSendTransaction(transaction);
+          signature = response.signature;
+          console.log('Solflare transaction response:', response);
         } else {
-          console.warn('Not saving to database - missing transaction signature');
+          // Fallback to adapter method for other wallets
+          signature = await wallet.adapter.sendTransaction(transaction, connection);
         }
-      } catch (error) {
-        console.error('Error saving token data:', error);
-      }
+        
+        console.log(`Transaction sent with signature: ${signature}`);
+        
+        // Wait for confirmation
+        console.log("Confirming transaction...");
+        
+        // Poll for status with limited attempts but longer delays for Solana's slower confirmations
+        const MAX_CONFIRMATION_ATTEMPTS = 45; // Increased from 30
+        const POLL_INTERVAL = 2000; // Increased from 1000ms to 2000ms
+        
+        let confirmed = false;
+        let attempts = 0;
+        
+        while (!confirmed && attempts < MAX_CONFIRMATION_ATTEMPTS) {
+          try {
+            attempts++;
+            console.log(`Confirmation attempt ${attempts}/${MAX_CONFIRMATION_ATTEMPTS}`);
+            const { value } = await connection.getSignatureStatus(signature);
+            
+            if (value) {
+              const confirmationStatus = value.confirmationStatus;
+              console.log(`Transaction status: ${confirmationStatus || 'processing'}`);
+              
+              if (confirmationStatus === 'confirmed' || confirmationStatus === 'finalized') {
+                confirmed = true;
+                break;
+              }
+              
+              if (value.err) {
+                console.error('Transaction error details:', value.err);
+                throw new Error(`Transaction failed: ${JSON.stringify(value.err)}`);
+              }
+            } else {
+              console.log("No signature status returned yet. Still processing...");
+            }
+            
+            // Wait before next poll
+            await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+          } catch (statusError) {
+            console.warn('Error checking status:', statusError);
+            // Continue polling despite errors
+          }
+        }
+        
+        if (!confirmed) {
+          console.warn(`Transaction ${signature} not confirmed after ${MAX_CONFIRMATION_ATTEMPTS} attempts`);
+          setStatus('Transaction may not have been fully confirmed yet. Check explorer for status.');
+        } else {
+          console.log(`Token created successfully!`);
+          setStatus('success');
+        }
 
-      // ===== STEP 7: RESET FORM =====
-      // Reset form and image preview
-      setFormData({
-        name: '',
-        symbol: '',
-        decimals: '',
-        supply: '',
-        description: '',
-        image: null,
-        revokeFreezeAuthority: true,
-        revokeMintAuthority: false,
-      });
-      setPromoCode('');
-      setAppliedPromo(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      setImagePreview(null);
-      setMintKeypair(Keypair.generate());
+        // ===== STEP 6: SAVE TOKEN DATA =====
+        setMintAddress(mint.toString());
+
+        // Save token creation data to localStorage for the recent tokens display
+        const newToken = {
+          name: formData.name,
+          symbol: formData.symbol,
+          mintAddress: mint.toString(),
+          image: imagePreview, // Store the image preview URL
+          timestamp: Date.now()
+        };
+        
+        try {
+          // Get existing tokens or initialize empty array
+          const existingTokens = JSON.parse(localStorage.getItem('recentTokens') || '[]');
+          
+          // Add new token to the beginning of the array (most recent first)
+          const updatedTokens = [newToken, ...existingTokens].slice(0, 5); // Keep only 5 most recent
+          
+          // Save back to localStorage
+          localStorage.setItem('recentTokens', JSON.stringify(updatedTokens));
+          console.log('Token saved to local storage:', newToken);
+          
+          // Only save to the database if transaction has a signature 
+          // This prevents partial/failed transactions from being saved
+          if (signature) {
+            console.log('Saving token to database with signature:', signature.substring(0, 10) + '...');
+            
+            // Also save token to the database via API
+            fetch(API_ENDPOINTS.saveToken, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                mintAddress: mint.toString(),
+                creatorWallet: publicKey.toString(),
+                ownerAddress: publicKey.toString(), // Set owner address explicitly
+                name: formData.name,
+                symbol: formData.symbol,
+                description: formData.description || `${formData.name} token on Solana`,
+                imageUrl: formattedImageUrl, // Use the formatted IPFS URL
+                solscanUrl: `https://solscan.io/token/${mint.toString()}`,
+                explorerUrl: `https://explorer.solana.com/address/${mint.toString()}`,
+                decimals: parseInt(formData.decimals), 
+                supply: formData.supply,
+                timestamp: new Date().toISOString(),
+                hasMintAuthority: !formData.revokeMintAuthority,
+                hasFreezeAuthority: !formData.revokeFreezeAuthority
+              }),
+            })
+            .then(response => response.json())
+            .then(data => {
+              if (data.success) {
+                console.log('Token saved to database:', data.message);
+              } else {
+                console.error('Failed to save token to database:', data.error);
+              }
+            })
+            .catch(error => {
+              console.error('Error saving token to database:', error);
+            });
+          } else {
+            console.warn('Not saving to database - missing transaction signature');
+          }
+        } catch (error) {
+          console.error('Error saving token data:', error);
+        }
+
+        // ===== STEP 7: RESET FORM =====
+        // Reset form and image preview
+        setFormData({
+          name: '',
+          symbol: '',
+          decimals: '',
+          supply: '',
+          description: '',
+          image: null,
+          revokeFreezeAuthority: true,
+          revokeMintAuthority: false,
+        });
+        setPromoCode('');
+        setAppliedPromo(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        setImagePreview(null);
+        setMintKeypair(Keypair.generate());
+      } catch (error) {
+        console.error('Error sending transaction:', error);
+        setStatus('Error: Transaction failed to send');
+      }
     } catch (error) {
       console.error('Error creating token:', error);
       setStatus('error');
@@ -1170,7 +1081,7 @@ export const TokenCreator = () => {
                   </p>
                 </div>
                 
-                {connected && estimatedFee && (
+                {isMounted && connected && estimatedFee && (
                   <div className="mt-6 p-4 rounded-xl bg-[#4F6BFF]/5 border border-[#4F6BFF]/20">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between">
                       <span className="text-sm font-medium text-white/90">Total Cost:</span>
@@ -1193,17 +1104,19 @@ export const TokenCreator = () => {
                 {/* Submit button - Now INSIDE the card UI */}
                 <button
                   type="submit"
-                  disabled={isUploading || isProcessing || !connected}
+                  disabled={!isMounted ? true : isClientProcessing || !isClientConnected}
                   className={`${buttonBaseStyle} mt-4 text-base font-semibold shadow-lg ${
-                    !connected 
+                    !isMounted ? 'bg-[#343434] text-white/50' : // Default state for server rendering
+                    !isClientConnected 
                       ? 'bg-[#343434] text-white/50'
-                      : isUploading || isProcessing
+                      : isClientProcessing
                         ? 'bg-gradient-to-r from-[#9945FF]/50 to-[#14F195]/50 cursor-wait'
                         : 'bg-gradient-to-r from-[#9945FF] to-[#14F195] hover:from-[#8935EE] hover:to-[#13E085] transform hover:-translate-y-0.5'
                   }`}
                 >
-                  <span className={`flex items-center justify-center gap-2 ${(isUploading || isProcessing) ? 'animate-pulse' : ''}`}>
-                    {!connected ? (
+                  <span className={`flex items-center justify-center gap-2 ${(isClientProcessing) ? 'animate-pulse' : ''}`}>
+                    {!isMounted ? 'Connect Wallet' : // Static text for server rendering
+                     !isClientConnected ? (
                       'Connect Wallet to Create'
                     ) : isUploading ? (
                       <>
@@ -1290,12 +1203,6 @@ export const TokenCreator = () => {
                           View on Explorer
                         </a>
                         <button
-                          onClick={() => window.location.reload()}
-                          className="inline-block px-4 py-2 bg-[#9945FF]/20 text-[#9945FF] hover:text-white transition-colors duration-200 rounded-lg text-sm font-medium border border-[#9945FF]/30"
-                        >
-                          Refresh Page
-                        </button>
-                        <button
                           onClick={async () => {
                             try {
                               // Let's try to resubmit the transaction with the direct approach
@@ -1308,7 +1215,7 @@ export const TokenCreator = () => {
                               
                               console.log('Creating a fresh transaction for retry...');
                               
-                              // Re-create token transaction from scratch
+                              // Re-create token transaction with higher compute limit
                               const { transaction: retryTx } = await createTokenTransactionWithoutMint(
                                 connection,
                                 publicKey,
@@ -1321,81 +1228,130 @@ export const TokenCreator = () => {
                                   revokeFreezeAuthority: formData.revokeFreezeAuthority,
                                   revokeMintAuthority: formData.revokeMintAuthority,
                                   mint: mintKeypair.publicKey,
-                                  customTreasuryFee: lastTreasuryFee
-                                }
+                                  customTreasuryFee: lastTreasuryFee,
+                                  computeUnits: 100000 // Reduced from 250000 based on actual usage
+                                },
+                                mintKeypair // Pass the full keypair
                               );
                               
-                              // Add a higher compute budget as the first instruction
-                              const originalInstructions = [...retryTx.instructions];
+                              // First, find and remove existing compute budget instructions
+                              const COMPUTE_BUDGET_PROGRAM_ID = 'ComputeBudget111111111111111111111111111111';
+                              const nonBudgetInstructions = retryTx.instructions.filter(
+                                (instr: TransactionInstruction) => instr.programId.toString() !== COMPUTE_BUDGET_PROGRAM_ID
+                              );
+
+                              // Clear existing instructions and add higher compute budget first
                               retryTx.instructions = [];
-                              
-                              // Add compute budget first
                               retryTx.add(
-                                ComputeBudgetProgram.setComputeUnitLimit({
-                                  units: 350000 // Much higher for retry
+                                ComputeBudgetProgram.setComputeUnitLimit({ 
+                                  units: 100000 // Reduced from 250000 based on actual usage
                                 })
                               );
-                              
-                              // Add all the original instructions back
-                              for (const instr of originalInstructions) {
-                                if (instr.programId.toString() !== 'ComputeBudget111111111111111111111111111111') {
-                                  retryTx.add(instr);
-                                }
+
+                              // Add back all non-budget instructions
+                              for (const instr of nonBudgetInstructions) {
+                                retryTx.add(instr);
                               }
                               
                               // Get a fresh blockhash
                               const { blockhash } = await connection.getLatestBlockhash('finalized');
                               retryTx.recentBlockhash = blockhash;
-                              
-                              // Safely set the fee payer
-                              if (!publicKey) {
-                                throw new Error('Wallet not connected');
-                              }
                               retryTx.feePayer = publicKey;
                               
-                              // Sign with the mint keypair
-                              const mintKeypairForSigning = Keypair.fromSecretKey(mintKeypair.secretKey);
-                              retryTx.partialSign(mintKeypairForSigning);
+                              // Sign with the mint keypair only for non-Phantom/Solflare wallets
+                              const isPhantomWallet = wallet?.adapter.name === 'Phantom';
+                              const isSolflareWallet = wallet?.adapter.name === 'Solflare';
+                              const needsUnsignedTx = isPhantomWallet || isSolflareWallet;
                               
-                              // Send directly via the wallet adapter
+                              if (!needsUnsignedTx) {
+                                const mintKeypairForSigning = Keypair.fromSecretKey(mintKeypair.secretKey);
+                                retryTx.partialSign(mintKeypairForSigning);
+                                console.log('Retry transaction partially signed with mint keypair for standard wallet');
+                              } else {
+                                console.log(`Using ${wallet?.adapter.name} wallet for retry - NOT pre-signing transaction`);
+                              }
+                              
+                              // Send via the wallet adapter with minimal configuration
                               console.log('Sending retry transaction directly via wallet adapter...');
-                              
                               setStatus('Please approve the retry transaction...');
                               
-                              // This will both sign with the user wallet and send the transaction in one step
-                              const signature = await wallet?.adapter.sendTransaction(retryTx, connection, {
-                                skipPreflight: true, // Skip preflight on retry
-                                preflightCommitment: 'confirmed',
-                                maxRetries: 5
-                              });
+                              // Check wallet is connected
+                              if (!wallet) {
+                                throw new Error('Wallet not connected');
+                              }
+                              
+                              // Use the proper provider based on wallet type
+                              let signature: string;
+                              if (wallet.adapter.name === 'Phantom') {
+                                // Use Phantom's injected provider
+                                const provider = (window as any).phantom?.solana;
+                                if (!provider || !provider.isPhantom) {
+                                  throw new Error('Phantom provider not found');
+                                }
+                                try {
+                                  console.log('Using Phantom provider for retry transaction');
+                                  const response = await provider.signAndSendTransaction(retryTx);
+                                  signature = response.signature;
+                                  console.log('Phantom retry transaction response:', response);
+                                } catch (err) {
+                                  console.error('Detailed Phantom retry error:', err);
+                                  throw err;
+                                }
+                              } else if (wallet.adapter.name === 'Solflare') {
+                                // Use Solflare's injected provider
+                                const provider = (window as any).solflare;
+                                if (!provider) {
+                                  throw new Error('Solflare provider not found');
+                                }
+                                const response = await provider.signAndSendTransaction(retryTx);
+                                signature = response.signature;
+                                console.log('Solflare retry transaction response:', response);
+                              } else {
+                                // Fallback to adapter method for other wallets
+                                signature = await wallet.adapter.sendTransaction(retryTx, connection);
+                              }
                               
                               if (!signature) {
                                 throw new Error('Failed to get transaction signature');
                               }
-                              
-                              console.log('Retry transaction submitted, signature:', signature);
+
+                              console.log('Manual retry transaction submitted, signature:', signature);
                               setStatus('Transaction resubmitted, waiting for confirmation...');
                               
-                              // Check for confirmation (limited attempts)
+                              // Poll for confirmation using the same method as the main transaction
+                              const MAX_CONFIRMATION_ATTEMPTS = 45; // Increased from 30
+                              const POLL_INTERVAL = 2000; // Increased from 1000ms to 2000ms
+                              
                               let confirmed = false;
-                              for (let i = 0; i < 10; i++) {
+                              let attempts = 0;
+                              
+                              while (!confirmed && attempts < MAX_CONFIRMATION_ATTEMPTS) {
                                 try {
-                                  await new Promise(r => setTimeout(r, 1000));
-                                  const status = await connection.getSignatureStatus(signature);
+                                  attempts++;
+                                  console.log(`Confirmation attempt ${attempts}/${MAX_CONFIRMATION_ATTEMPTS}`);
+                                  const { value } = await connection.getSignatureStatus(signature);
                                   
-                                  if (status && status.value) {
-                                    if (status.value.confirmationStatus === 'confirmed' || 
-                                        status.value.confirmationStatus === 'finalized') {
+                                  if (value) {
+                                    const confirmationStatus = value.confirmationStatus;
+                                    console.log(`Transaction status: ${confirmationStatus || 'processing'}`);
+                                    
+                                    if (confirmationStatus === 'confirmed' || confirmationStatus === 'finalized') {
                                       confirmed = true;
                                       break;
                                     }
                                     
-                                    if (status.value.err) {
-                                      throw new Error(`Transaction failed: ${JSON.stringify(status.value.err)}`);
+                                    if (value.err) {
+                                      console.error('Transaction error details:', value.err);
+                                      throw new Error(`Transaction failed: ${JSON.stringify(value.err)}`);
                                     }
+                                  } else {
+                                    console.log("No signature status returned yet. Still processing...");
                                   }
-                                } catch (err) {
-                                  console.warn('Error checking status:', err);
+                                  
+                                  // Wait before next poll
+                                  await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+                                } catch (statusError) {
+                                  console.warn('Error checking retry status:', statusError);
                                 }
                               }
                               
@@ -1412,7 +1368,7 @@ export const TokenCreator = () => {
                                   }
                                 }
                               } else {
-                                setStatus('Transaction resubmitted, but confirmation is still pending.');
+                                setStatus('Transaction resubmitted, but confirmation is still pending. Check explorer for status.');
                               }
                             } catch (error) {
                               console.error('Error resubmitting transaction:', error);

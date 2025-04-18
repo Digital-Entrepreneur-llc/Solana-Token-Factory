@@ -4,7 +4,13 @@ import { useWallet as useSolanaWallet } from '@solana/wallet-adapter-react';
 import { useConnection } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import { useCallback, useMemo, useEffect, useState } from 'react';
-import { Transaction, SendOptions, Commitment, Connection } from '@solana/web3.js';
+import {
+  Connection,
+  PublicKey,
+  Transaction,
+  SendOptions,
+} from '@solana/web3.js';
+import { PhantomProvider, PhantomWindow } from '@/app/types/phantom.d';
 
 type DeviceType = 'desktop' | 'mobile' | 'tablet';
 
@@ -56,7 +62,16 @@ export const useWallet = () => {
           }
         });
         
-        // Test the connection to make sure it's working
+        // Only set the connection once to avoid infinite re-rendering
+        setConnection(prevConnection => {
+          // Only update if it's actually different to prevent re-renders
+          if (prevConnection?.rpcEndpoint !== newConnection.rpcEndpoint) {
+            return newConnection;
+          }
+          return prevConnection;
+        });
+        
+        // Test the connection separately to avoid render loops
         newConnection.getLatestBlockhash()
           .then(blockhash => {
             console.log('Connection test successful:', blockhash.blockhash.substring(0, 8) + '...');
@@ -66,13 +81,12 @@ export const useWallet = () => {
             console.warn('Falling back to default connection due to test failure');
           });
         
-        setConnection(newConnection);
         //console.log('Connection initialized without WebSockets:', rpcUrl);
       } catch (error) {
         console.error('Failed to initialize connection:', error);
       }
     }
-  }, [originalConnection]);
+  }, [originalConnection]); // Keep originalConnection as the only dependency
 
   const { setVisible } = useWalletModal();
   const [deviceType, setDeviceType] = useState<DeviceType>('desktop');
@@ -152,94 +166,116 @@ export const useWallet = () => {
     }
   }, [wallet, setVisible, select, connected, connecting]);
 
-  const signAndSendTransaction = async (transaction: Transaction, options?: SendOptions) => {
-    if (!wallet || !publicKey) {
-      throw new Error('Wallet not connected');
-    }
-    
-    try {
-      const commitment: Commitment = 'confirmed';
-      
-      // Get the latest blockhash and set transaction parameters
-      console.log('Getting latest blockhash...');
-      const { blockhash } = await connection.getLatestBlockhash('finalized');
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = publicKey;
-      
-      // Log transaction details for debugging
-      console.log('Transaction details:', {
-        numInstructions: transaction.instructions.length,
-        feePayer: publicKey.toString(),
-        requiredSigners: transaction.signatures
-          .filter(s => s.signature === null)
-          .map(s => s.publicKey.toString())
-      });
-      
-      // Send the transaction
-      console.log('Sending transaction...');
-      const signature = await wallet.adapter.sendTransaction(transaction, connection, {
-        skipPreflight: false,
-        preflightCommitment: commitment,
-        maxRetries: 5,
-        ...options,
-      });
-      
-      console.log('Transaction sent with signature:', signature);
-      
-      // Wait for confirmation with a polling approach
-      let confirmed = false;
-      let attempts = 0;
-      const maxAttempts = 30; // 30 seconds max
-      
-      while (attempts < maxAttempts && !confirmed) {
-        try {
-          const status = await connection.getSignatureStatus(signature);
-          if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
-            console.log('Transaction confirmed via polling');
-            confirmed = true;
-            break;
-          }
-          
-          if (status.value?.err) {
-            throw new Error(`Transaction failed: ${status.value.err.toString()}`);
-          }
-        } catch (pollError) {
-          console.warn('Polling attempt failed:', pollError);
-        }
-        
-        // Wait 1 second before trying again
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        attempts++;
-      }
-      
-      if (!confirmed) {
-        console.warn('Transaction confirmation timed out, but signature was returned');
-      }
-      
-      return signature;
-    } catch (error) {
-      console.error('Transaction error:', error);
-      throw error;
-    }
-  };
-
   const signTransaction = async (transaction: Transaction): Promise<Transaction> => {
     if (!wallet || !publicKey) {
       throw new Error('Wallet not connected');
     }
     
     try {
+      // Check wallet type to determine the right approach
+      const walletName = wallet.adapter.name;
+      console.log(`Signing transaction with wallet: ${walletName}`);
+      
+      // For Phantom wallet, we might want to use the injected provider
+      const isPhantomWallet = walletName === 'Phantom';
+      const isSolflareWallet = walletName === 'Solflare';
+      
+      if (isPhantomWallet) {
+        // Use Phantom's injected provider
+        const phantomWindow = window as unknown as PhantomWindow;
+        const provider = phantomWindow.solana;
+        if (provider && provider.isPhantom) {
+          console.log('Using Phantom injected provider for signing');
+          const signedTx = await provider.signTransaction(transaction);
+          // Ensure we're returning the right type
+          return signedTx as Transaction;
+        }
+      } else if (isSolflareWallet) {
+        // Use Solflare's injected provider
+        const solflareWindow = window as unknown as PhantomWindow;
+        const provider = solflareWindow.solflare;
+        if (provider) {
+          console.log('Using Solflare injected provider for signing');
+          const signedTx = await provider.signTransaction(transaction);
+          // Ensure we're returning the right type
+          return signedTx as Transaction;
+        }
+      }
+      
+      // Fallback to wallet-adapter method
       if (walletAdapterSignTransaction) {
-        console.log('Signing transaction with wallet:', wallet.adapter.name);
-        
+        console.log('Using wallet adapter for signing');
         return await wrapPromiseWithErrorHandling(
           walletAdapterSignTransaction(transaction),
           'Transaction signing'
         );
       }
+      
       throw new Error('Wallet does not support signTransaction');
     } catch (error) {
       console.error('Signing error:', error);
+      throw error;
+    }
+  };
+
+  const signAndSendTransaction = async (transaction: Transaction, options?: SendOptions) => {
+    if (!wallet || !publicKey) {
+      throw new Error('Wallet not connected');
+    }
+    
+    try {
+      const walletName = wallet.adapter.name;
+      console.log(`Using wallet: ${walletName}`);
+      
+      let signature: string;
+      const isPhantomWallet = walletName === 'Phantom';
+      const isSolflareWallet = walletName === 'Solflare';
+      
+      if (isPhantomWallet) {
+        // Use Phantom's injected provider directly - per Phantom docs
+        const phantomWindow = window as unknown as PhantomWindow;
+        const provider = phantomWindow.phantom?.solana;
+        if (provider && provider.isPhantom) {
+          console.log('Using Phantom injected provider');
+          try {
+            // Following Phantom docs: provider.signAndSendTransaction returns { signature, publicKey }
+            const response = await provider.signAndSendTransaction(transaction, options);
+            signature = response.signature;
+            console.log('Phantom transaction response:', response);
+          } catch (err) {
+            console.error('Detailed Phantom error:', err);
+            throw err; // Preserve the original error and stack trace
+          }
+        } else {
+          // Fallback to wallet adapter
+          console.log('Phantom provider not detected, using adapter');
+          signature = await wallet.adapter.sendTransaction(transaction, connection, options);
+        }
+      } else if (isSolflareWallet) {
+        // Use Solflare's injected provider directly
+        const solflareWindow = window as unknown as PhantomWindow;
+        const provider = solflareWindow.solflare;
+        if (provider) {
+          console.log('Using Solflare injected provider');
+          // Similar to Phantom: provider.signAndSendTransaction returns { signature, publicKey }
+          const response = await provider.signAndSendTransaction(transaction, options);
+          signature = response.signature;
+          console.log('Solflare transaction response:', response);
+        } else {
+          // Fallback to wallet adapter
+          console.log('Solflare provider not detected, using adapter');
+          signature = await wallet.adapter.sendTransaction(transaction, connection, options);
+        }
+      } else {
+        // Use standard wallet adapter for other wallets
+        console.log('Using standard wallet adapter');
+        signature = await wallet.adapter.sendTransaction(transaction, connection, options);
+      }
+      
+      console.log(`Transaction sent with signature: ${signature}`);
+      return signature;
+    } catch (error) {
+      console.error('Transaction error:', error);
       throw error;
     }
   };

@@ -33,22 +33,22 @@ const PromoBanner = () => {
     const getPromoCodes = async () => {
       try {
         setIsLoading(true);
-        console.log('Fetching promo codes...');
+        //console.log('Fetching promo codes...');
         const codes = await fetchPromoCodes();
-        console.log('Fetched promo codes:', codes);
+        //console.log('Fetched promo codes:', codes);
         
         // Get the first promo code
         const firstCode = Object.values(codes)[0];
         
         if (firstCode) {
-          console.log('Found promo code:', firstCode);
+          //console.log('Found promo code:', firstCode);
           setPromoCode(firstCode);
         } else {
-          console.log('No promo codes found, using fallback');
+          //console.log('No promo codes found, using fallback');
           setPromoCode(FALLBACK_PROMO);
         }
       } catch (error) {
-        console.error('Failed to fetch promo code:', error);
+        //console.error('Failed to fetch promo code:', error);
         // Use fallback if API fails
         setPromoCode(FALLBACK_PROMO);
       } finally {
@@ -64,13 +64,13 @@ const PromoBanner = () => {
     if (isLoading) return;
     
     if (!promoCode) {
-      console.warn('No promo code available for countdown');
+      //console.warn('No promo code available for countdown');
       return;
     }
     
     // Return early if no expiry date
     if (!promoCode.expiryDate) {
-      console.warn('Promo code has no expiry date');
+      //console.warn('Promo code has no expiry date');
       return;
     }
     
@@ -85,14 +85,14 @@ const PromoBanner = () => {
       } else {
         // Fallback to end of current month if unexpected type
         expiryDate = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0);
-        console.warn('Using fallback expiry date (end of month)');
+        //console.warn('Using fallback expiry date (end of month)');
       }
       
-      console.log('Calculating time left until:', expiryDate.toISOString());
+      //console.log('Calculating time left until:', expiryDate.toISOString());
       const difference = expiryDate.getTime() - new Date().getTime();
       
       if (difference <= 0) {
-        console.log('Promo code expired');
+        //console.log('Promo code expired');
         setIsVisible(false);
         return;
       }
@@ -123,13 +123,13 @@ const PromoBanner = () => {
   
   // Show loading state or nothing if not available
   if (isLoading) {
-    console.log('Promo banner is loading...');
+    //console.log('Promo banner is loading...');
     return null;
   }
   
   // If user closed the banner or there's no promo code, don't show
   if (!isVisible || !promoCode) {
-    console.log('Banner not visible due to:', !isVisible ? 'user closed' : 'no promo code');
+    //console.log('Banner not visible due to:', !isVisible ? 'user closed' : 'no promo code');
     return null;
   }
   

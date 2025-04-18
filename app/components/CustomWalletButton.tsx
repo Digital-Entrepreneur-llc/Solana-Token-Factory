@@ -20,7 +20,7 @@ const CustomWalletButton = () => {
     return () => window.removeEventListener('resize', checkScreenSize);
   }, []);
 
-  // Allow all wallet adapters
+  // Allow all wallet types, especially Phantom
   const allowedWallets = wallets;
 
   const handleConnect = useCallback(() => {

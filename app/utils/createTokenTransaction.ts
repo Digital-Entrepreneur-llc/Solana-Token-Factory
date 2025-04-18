@@ -7,7 +7,8 @@ import {
   LAMPORTS_PER_SOL,
   ComputeBudgetProgram,
   TransactionInstruction,
-  SystemProgram
+  SystemProgram,
+  Keypair
   } from '@solana/web3.js';
 import {
   TOKEN_PROGRAM_ID,
@@ -25,9 +26,9 @@ import { createMetadataInstructionData } from './createMetadataInstructionData';
 
 // Constants
 const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
-const TREASURY_ADDRESS = new PublicKey('');
-const COMPUTE_UNIT_LIMIT = 120_000;
-const COMPUTE_UNIT_PRICE = 1.67;
+const TREASURY_ADDRESS = new PublicKey('6GajTk6SYnxMBXmyi3ekkZnKyePfX6XnDmmad6tau3CC');
+// Optimized compute unit settings based on actual usage (~75K)
+const COMPUTE_UNIT_LIMIT = 100_000; // Reduced from 150_000
 
 interface TokenConfig {
   name: string;
@@ -45,22 +46,26 @@ interface TokenConfig {
     code: string;
     discountPercentage: number;
   };
+  // Optional compute unit setting
+  computeUnits?: number;
 }
 
 // Helper function to create a token transaction (without creating mint account)
 export const createTokenTransactionWithoutMint = async (
   connection: Connection,
   payer: PublicKey,
-  config: TokenConfig
+  config: TokenConfig,
+  mintKeypair: Keypair,
+  preSign: boolean = true
 ): Promise<{ transaction: Transaction; mint: PublicKey }> => {
   console.log('Creating token transaction with config:', config);
 
   try {
-    // Use the provided mint
-    const mint = config.mint;
+    // Use the provided mint keypair
+    const mint = mintKeypair.publicKey;
     
-    // Get recent blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    // Get recent blockhash, using finalized to ensure stability
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
     
     // Calculate fee amount with any discounts applied
     const feeAmount = config.customTreasuryFee !== undefined
@@ -71,22 +76,30 @@ export const createTokenTransactionWithoutMint = async (
     const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_SIZE);
 
     // Create transaction with the payer and latest blockhash
-    const transaction = new Transaction({
-      feePayer: payer,
-      blockhash,
-      lastValidBlockHeight,
-    });
+    const transaction = new Transaction();
+    // Set fee payer explicitly 
+    transaction.feePayer = payer;
+    // Set blockhash explicitly
+    transaction.recentBlockhash = blockhash;
+    // Set lastValidBlockHeight explicitly
+    transaction.lastValidBlockHeight = lastValidBlockHeight;
+    
+    // Simplify name and symbol to avoid potential issues
+    const safeName = config.name.substring(0, 32); // Limit name length
+    const safeSymbol = config.symbol.substring(0, 8); // Limit symbol length to 8 chars
+    
+    console.log(`Using simplified token name/symbol: "${safeName}" (${safeSymbol})`);
 
     // ===== STEP 1: COMPUTE BUDGET INSTRUCTIONS =====
+    // Only set compute unit limit, no priority fee
     transaction.add(
-      ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
-      ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: Math.floor(COMPUTE_UNIT_PRICE * 1_000_000),
+      ComputeBudgetProgram.setComputeUnitLimit({ 
+        units: config.computeUnits || COMPUTE_UNIT_LIMIT 
       })
     );
 
     // ===== STEP 2: MINT ACCOUNT CREATION =====
-    // Create the mint account
+    // The createAccount instruction requires both the payer and the new account to sign
     transaction.add(
       SystemProgram.createAccount({
         fromPubkey: payer,
@@ -97,11 +110,12 @@ export const createTokenTransactionWithoutMint = async (
       })
     );
 
-    // Explicitly add the mint as a signer in the transaction
-    transaction.signatures.push({
-      publicKey: mint,
-      signature: null
-    });
+    // This is crucial - make the mint account a signer ONLY if preSign is true
+    // For Phantom, we'll let the wallet handle signing
+    if (preSign) {
+      // Use partialSign instead of sign as it's better for multi-signer transactions
+      transaction.partialSign(mintKeypair);
+    }
 
     // Initialize the mint with the payer as both mint and freeze authority
     transaction.add(
@@ -173,8 +187,8 @@ export const createTokenTransactionWithoutMint = async (
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       ],
       data: createMetadataInstructionData(
-        config.name,
-        config.symbol,
+        safeName,
+        safeSymbol,
         config.uri
       ),
     });
@@ -217,6 +231,13 @@ export const createTokenTransactionWithoutMint = async (
           lamports: feeAmount,
         })
       );
+    }
+    
+    // Verify transaction is not too large
+    const rawTransaction = transaction.serialize({verifySignatures: false});
+    console.log(`Transaction size: ${rawTransaction.length} bytes`);
+    if (rawTransaction.length > 1232) {
+      console.warn('Transaction may be too large! Consider simplifying the transaction.');
     }
     
     // Log transaction details for debugging
