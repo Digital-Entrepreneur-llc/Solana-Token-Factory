@@ -17,11 +17,11 @@ import { createSetAuthorityInstruction, AuthorityType, getMint } from '@solana/s
 import { AUTHORITY_REVOCATION_FEE, formatFee } from '@/app/config/fees';
 
 // Constant definitions
-const TREASURY_ADDRESS = new PublicKey('6GajTk6SYnxMBXmyi3ekkZnKyePfX6XnDmmad6tau3CC');
+const TREASURY_ADDRESS = new PublicKey('');
 const COMPUTE_UNIT_LIMIT = 100_000;
 const COMPUTE_UNIT_PRICE = 1.67;
 // Use Alchemy RPC exclusively for this component
-const ALCHEMY_RPC_ENDPOINT = 'https://solana-mainnet.g.alchemy.com/v2/s9hXAbD-sa3eILjNmk20Cbz0jGELy2L6';
+const ALCHEMY_RPC_ENDPOINT = '';
 
 // Styling constants
 const gradientBorder = 'border border-transparent bg-gradient-to-r from-[#9945FF]/40 to-[#14F195]/40 p-[1px]';
