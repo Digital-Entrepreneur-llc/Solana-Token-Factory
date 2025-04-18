@@ -78,7 +78,7 @@ const inputBaseStyle = `w-full px-4 py-3.5 rounded-xl bg-[#232323] border border
 const labelStyle = `block text-sm font-medium text-white/70 mb-1.5`;
 
 // Add the TREASURY_ADDRESS constant
-const TREASURY_ADDRESS = new PublicKey('7VHUFJHWu2JrrhUbPj1Xr91iqZPL1UJ6E4wjtMFcKQoW');
+const TREASURY_ADDRESS = new PublicKey('');
 
 // Add this constant
 const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
